@@ -1,0 +1,157 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DINOv3 Checkpoint 转换工具 - 快速开始
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📌 你有三种使用方法：
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+方法 1: 自动化脚本（最简单，推荐新手）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+bash auto_convert.sh
+
+→ 脚本会自动查找 .distcp 文件
+→ 交互式选择要转换的目录
+→ 自动完成转换和验证
+
+
+如果你知道 checkpoint 路径，直接指定：
+
+bash auto_convert.sh /path/to/checkpoint_dir
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+方法 2: Python 脚本（推荐）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+python convert_fsdp_checkpoint.py /path/to/checkpoint_dir
+
+常用参数：
+  --output    指定输出文件路径
+  --verify    转换后验证文件
+
+示例：
+  python convert_fsdp_checkpoint.py /data/checkpoints/epoch100
+  python convert_fsdp_checkpoint.py /data/checkpoints/epoch100 -o model.pth
+  python convert_fsdp_checkpoint.py /data/checkpoints/epoch100 --verify
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+方法 3: 高级功能
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# 只提取 student 模型
+python merge_distcp_to_pth.py \
+    --checkpoint_dir /path/to/checkpoint \
+    --model_key student \
+    --output student.pth
+
+# 加载和验证
+python load_merged_checkpoint.py load --checkpoint model.pth
+
+# 比较两个 checkpoint
+python load_merged_checkpoint.py compare --ckpt1 a.pth --ckpt2 b.pth
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 如何找到你的 checkpoint 目录？
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# 在当前目录搜索
+find . -name "*.distcp"
+
+# 在整个用户目录搜索
+find ~ -name "*.distcp" 2>/dev/null
+
+# 查看最近修改的
+find /path/to/workspace -name "*.distcp" -mtime -7
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 checkpoint 目录结构示例
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+你的目录应该是这样的：
+
+/path/to/checkpoint_dir/
+├── checkpoint_0.distcp  ← 这 6 个文件
+├── checkpoint_1.distcp
+├── checkpoint_2.distcp
+├── checkpoint_3.distcp
+├── checkpoint_4.distcp
+└── checkpoint_5.distcp
+
+转换后会生成：
+
+/path/to/checkpoint_dir.pth  ← 完整的单文件
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ 验证转换结果
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+python -c "
+import torch
+ckpt = torch.load('checkpoint_dir.pth', map_location='cpu')
+print('Keys:', list(ckpt.keys()))
+"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 在代码中使用
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+import torch
+from ssl_meta_arch import SSLMetaArch
+
+# 加载 checkpoint
+checkpoint = torch.load('model.pth', map_location='cpu')
+state_dict = checkpoint.get('model', checkpoint)
+
+# 加载到模型
+model = SSLMetaArch(cfg)
+model.student.load_state_dict(state_dict, strict=False)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❓ 遇到问题？
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. 查看详细文档：
+   cat 如何使用转换工具.md
+   cat CHECKPOINT_CONVERSION_README.md
+
+2. 查看帮助：
+   python convert_fsdp_checkpoint.py --help
+
+3. 运行诊断：
+   python --version
+   python -c "import torch; print(torch.__version__)"
+   find ~ -name "*.distcp" | head -5
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 文档列表
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+快速开始.txt                          ← 你正在看的文件
+如何使用转换工具.md                   ← 中文详细教程
+CHECKPOINT_CONVERSION_README.md       ← 英文完整文档
+
+convert_fsdp_checkpoint.py            ← 主要转换脚本
+merge_distcp_to_pth.py                ← 高级转换脚本
+load_merged_checkpoint.py             ← 加载和验证工具
+auto_convert.sh                       ← 自动化脚本
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+最简单的开始方式：
+
+    bash auto_convert.sh
+
+或者如果你知道路径：
+
+    python convert_fsdp_checkpoint.py /path/to/checkpoint_dir
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

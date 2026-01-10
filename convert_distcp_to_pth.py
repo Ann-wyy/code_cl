@@ -3,12 +3,25 @@
 Convert distributed checkpoint (.distcp) to standard PyTorch checkpoint (.pth)
 
 Usage:
-    python convert_distcp_to_pth.py --input <distcp_dir> --output <output.pth>
+    # Using config file (recommended)
+    python convert_distcp_to_pth.py \
+        --input <distcp_dir> \
+        --output <output.pth> \
+        --config <config.yaml>
+
+    # Using manual parameters
+    python convert_distcp_to_pth.py \
+        --input <distcp_dir> \
+        --output <output.pth> \
+        --model_type vit_base \
+        --patch_size 14 \
+        --img_size 518
 
 Example:
     python convert_distcp_to_pth.py \
         --input ./output/eval/1000/sharded_teacher_checkpoint \
-        --output ./teacher_checkpoint.pth
+        --output ./teacher_checkpoint.pth \
+        --config ./output/config.yaml
 """
 
 import argparse
@@ -19,15 +32,65 @@ from torch.distributed.tensor import DTensor
 import torch.distributed.checkpoint as dcp
 import torch.distributed.checkpoint.filesystem as dcpfs
 import torch.distributed.checkpoint.state_dict as dcpsd
+from omegaconf import OmegaConf
 from dinov3.models.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+
+
+def load_model_from_config(config_path: str):
+    """
+    Load model configuration from config file.
+
+    Args:
+        config_path: Path to the dinov3 config yaml file
+
+    Returns:
+        tuple: (model, model_type, patch_size, img_size)
+    """
+    cfg = OmegaConf.load(config_path)
+
+    # Extract model parameters from config
+    model_arch = cfg.student.arch  # e.g., "vit_base", "vit_large"
+    patch_size = cfg.student.patch_size
+    img_size = cfg.crops.global_crops_size
+
+    # Apply teacher_to_student_resolution_scale if present
+    if "teacher_to_student_resolution_scale" in cfg.crops:
+        scale = cfg.crops.teacher_to_student_resolution_scale
+        # Teacher uses scaled patch size
+        teacher_patch_size = int(patch_size * scale)
+    else:
+        teacher_patch_size = patch_size
+
+    print(f"Config: arch={model_arch}, patch_size={teacher_patch_size}, img_size={img_size}")
+
+    model_fn_map = {
+        "vit_small": vit_small,
+        "vit_base": vit_base,
+        "vit_large": vit_large,
+        "vit_giant2": vit_giant2,
+    }
+
+    if model_arch not in model_fn_map:
+        raise ValueError(f"Unknown model architecture: {model_arch}. Choose from {list(model_fn_map.keys())}")
+
+    # Create model with config parameters
+    model = model_fn_map[model_arch](
+        patch_size=teacher_patch_size,
+        img_size=img_size,
+        init_values=1.0,
+        block_chunks=0,
+    )
+
+    return model, model_arch, teacher_patch_size, img_size
 
 
 def convert_distcp_to_pth(
     distcp_dir: str,
     output_path: str,
-    model_type: str = "vit_base",
-    patch_size: int = 14,
-    img_size: int = 518,
+    config_path: str = None,
+    model_type: str = None,
+    patch_size: int = None,
+    img_size: int = None,
 ):
     """
     Convert a distributed checkpoint to a standard PyTorch checkpoint.
@@ -35,9 +98,10 @@ def convert_distcp_to_pth(
     Args:
         distcp_dir: Path to the distributed checkpoint directory
         output_path: Path to save the output .pth file
-        model_type: Model architecture (vit_small, vit_base, vit_large, vit_giant2)
-        patch_size: Patch size used in the model
-        img_size: Image size used in the model
+        config_path: Path to dinov3 config yaml file (recommended)
+        model_type: Model architecture (vit_small, vit_base, vit_large, vit_giant2) - only if config_path is None
+        patch_size: Patch size used in the model - only if config_path is None
+        img_size: Image size used in the model - only if config_path is None
     """
     distcp_dir = Path(distcp_dir)
     output_path = Path(output_path)
@@ -52,24 +116,32 @@ def convert_distcp_to_pth(
     if not dist.is_initialized():
         dist.init_process_group(backend="gloo", init_method="tcp://localhost:12355", rank=0, world_size=1)
 
-    # Create model based on type
-    model_fn_map = {
-        "vit_small": vit_small,
-        "vit_base": vit_base,
-        "vit_large": vit_large,
-        "vit_giant2": vit_giant2,
-    }
+    # Load model from config or create manually
+    if config_path is not None:
+        print(f"Loading model configuration from: {config_path}")
+        model, model_type, patch_size, img_size = load_model_from_config(config_path)
+    else:
+        # Manual specification
+        if model_type is None or patch_size is None or img_size is None:
+            raise ValueError("Must provide either --config or all of (--model_type, --patch_size, --img_size)")
 
-    if model_type not in model_fn_map:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from {list(model_fn_map.keys())}")
+        model_fn_map = {
+            "vit_small": vit_small,
+            "vit_base": vit_base,
+            "vit_large": vit_large,
+            "vit_giant2": vit_giant2,
+        }
 
-    print(f"Creating model: {model_type} with patch_size={patch_size}, img_size={img_size}")
-    model = model_fn_map[model_type](
-        patch_size=patch_size,
-        img_size=img_size,
-        init_values=1.0,
-        block_chunks=0,
-    )
+        if model_type not in model_fn_map:
+            raise ValueError(f"Unknown model type: {model_type}. Choose from {list(model_fn_map.keys())}")
+
+        print(f"Creating model: {model_type} with patch_size={patch_size}, img_size={img_size}")
+        model = model_fn_map[model_type](
+            patch_size=patch_size,
+            img_size=img_size,
+            init_values=1.0,
+            block_chunks=0,
+        )
 
     # Load the distributed checkpoint
     print("Loading distributed checkpoint...")
@@ -101,20 +173,46 @@ def convert_distcp_to_pth(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert distributed checkpoint to standard PyTorch checkpoint")
-    parser.add_argument("--input", type=str, required=True, help="Path to distributed checkpoint directory")
-    parser.add_argument("--output", type=str, required=True, help="Output path for .pth file")
-    parser.add_argument("--model_type", type=str, default="vit_base",
+    parser = argparse.ArgumentParser(
+        description="Convert distributed checkpoint to standard PyTorch checkpoint",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Using config file (recommended):
+  python convert_distcp_to_pth.py \\
+      --input ./output/eval/1000/sharded_teacher_checkpoint \\
+      --output ./teacher_checkpoint.pth \\
+      --config ./output/config.yaml
+
+  # Using manual parameters:
+  python convert_distcp_to_pth.py \\
+      --input ./output/eval/1000/sharded_teacher_checkpoint \\
+      --output ./teacher_checkpoint.pth \\
+      --model_type vit_base \\
+      --patch_size 14 \\
+      --img_size 518
+        """
+    )
+    parser.add_argument("--input", type=str, required=True,
+                        help="Path to distributed checkpoint directory")
+    parser.add_argument("--output", type=str, required=True,
+                        help="Output path for .pth file")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to dinov3 config yaml file (recommended)")
+    parser.add_argument("--model_type", type=str, default=None,
                         choices=["vit_small", "vit_base", "vit_large", "vit_giant2"],
-                        help="Model architecture type")
-    parser.add_argument("--patch_size", type=int, default=14, help="Patch size")
-    parser.add_argument("--img_size", type=int, default=518, help="Image size")
+                        help="Model architecture type (only if --config not provided)")
+    parser.add_argument("--patch_size", type=int, default=None,
+                        help="Patch size (only if --config not provided)")
+    parser.add_argument("--img_size", type=int, default=None,
+                        help="Image size (only if --config not provided)")
 
     args = parser.parse_args()
 
     convert_distcp_to_pth(
         distcp_dir=args.input,
         output_path=args.output,
+        config_path=args.config,
         model_type=args.model_type,
         patch_size=args.patch_size,
         img_size=args.img_size,

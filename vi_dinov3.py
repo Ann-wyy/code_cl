@@ -1,7 +1,5 @@
 import os
-PYTHONPATH='/data/dataserver01/zhangruipeng/code/PETCT/dinov3_pretrain/dinov3'
 import sys
-sys.path.insert(0, PYTHONPATH)
 import torch
 import numpy as np
 from PIL import Image

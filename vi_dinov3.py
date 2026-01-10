@@ -17,20 +17,14 @@ import dinov3.distributed as distributed
 def build_official_model_eval(config_path, weights_path):
     # 初始化分布式环境（即使是单GPU也需要）
     if not distributed.is_enabled():
-        # 设置单GPU环境
+        # 设置单GPU环境变量
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '12355'
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
         os.environ['LOCAL_RANK'] = '0'
 
-        # 初始化分布式
-        torch.distributed.init_process_group(
-            backend='nccl' if torch.cuda.is_available() else 'gloo',
-            init_method='env://',
-            world_size=1,
-            rank=0
-        )
+        # 使用 dinov3 的分布式包装器初始化（它会自动调用 init_process_group）
         distributed.enable(overwrite=True)
         print("Distributed environment initialized for single GPU/CPU inference")
 

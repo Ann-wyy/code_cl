@@ -11,16 +11,35 @@ from tqdm import tqdm
 # --- 导入官方组件 ---
 from dinov3.configs import setup_config
 from dinov3.train.ssl_meta_arch import SSLMetaArch
+import dinov3.distributed as distributed
 
 # 模拟 argparse 给 setup_config 用
 def build_official_model_eval(config_path, weights_path):
+    # 初始化分布式环境（即使是单GPU也需要）
+    if not distributed.is_enabled():
+        # 设置单GPU环境
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '12355'
+        os.environ['RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
+        os.environ['LOCAL_RANK'] = '0'
+
+        # 初始化分布式
+        torch.distributed.init_process_group(
+            backend='nccl' if torch.cuda.is_available() else 'gloo',
+            init_method='env://',
+            world_size=1,
+            rank=0
+        )
+        distributed.enable(overwrite=True)
+        print("Distributed environment initialized for single GPU/CPU inference")
 
     class MockArgs:
         def __init__(self):
-            self.config_file = config_path 
+            self.config_file = config_path
             # 这里的 opts 配合 eval 模式
             self.opts = []
-            self.output_dir = os.path.dirname(config_path) 
+            self.output_dir = os.path.dirname(config_path)
             self.no_resume = True
             self.eval_only = True  # 触发 eval 模式标志
 

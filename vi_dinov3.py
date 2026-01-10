@@ -54,12 +54,15 @@ def build_official_model_eval(config_path, weights_path):
     print(f"Loading checkpoint from: {weights_path}")
     checkpoint = torch.load(weights_path, map_location="cpu")
 
+    # 调试：打印 checkpoint 的顶层键
+    print(f"Checkpoint top-level keys (first 10): {list(checkpoint.keys())[:10]}")
+
     # 检查 checkpoint 的结构并加载权重
     if 'teacher' in checkpoint:
         # 完整的训练checkpoint，包含 teacher/student/model_ema
         state_dict = checkpoint
-    elif 'backbone' in checkpoint:
-        # 只有单个模型的权重，需要添加前缀映射到 model_ema
+    elif any(key.startswith('backbone.') for key in list(checkpoint.keys())[:20]):
+        # 只有单个模型的权重（键名像 'backbone.xxx'），需要添加前缀映射到 model_ema
         print("Detected single model checkpoint, mapping to model_ema...")
         state_dict = {}
         for key, value in checkpoint.items():
@@ -69,6 +72,7 @@ def build_official_model_eval(config_path, weights_path):
             state_dict[new_key] = value
     else:
         # 未知格式
+        print(f"WARNING: Unknown checkpoint format! Keys: {list(checkpoint.keys())[:5]}")
         state_dict = checkpoint
 
     # 加载权重到 CPU

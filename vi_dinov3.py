@@ -54,17 +54,32 @@ def build_official_model_eval(config_path, weights_path):
     print(f"Loading checkpoint from: {weights_path}")
     checkpoint = torch.load(weights_path, map_location="cpu")
 
-    # DINOv3 官方权重通常包含 'teacher', 'student' 等 key
-    # 如果你只需要 teacher 用于 PCA，这里提取 teacher
+    # 检查 checkpoint 的结构并加载权重
     if 'teacher' in checkpoint:
-        state_dict = checkpoint['teacher']
+        # 完整的训练checkpoint，包含 teacher/student/model_ema
+        state_dict = checkpoint
+    elif 'backbone' in checkpoint:
+        # 只有单个模型的权重，需要添加前缀映射到 model_ema
+        print("Detected single model checkpoint, mapping to model_ema...")
+        state_dict = {}
+        for key, value in checkpoint.items():
+            # 将 backbone.* -> model_ema.backbone.*
+            # 将 dino_head.* -> model_ema.dino_head.*
+            new_key = f"model_ema.{key}"
+            state_dict[new_key] = value
     else:
+        # 未知格式
         state_dict = checkpoint
 
     # 加载权重到 CPU
-    # 如果报错 key 不匹配，通常是因为官方权重带了 'backbone.' 前缀
     msg = model.load_state_dict(state_dict, strict=False)
-    print(f"Weights loaded. Message: {msg}")
+    print(f"Weights loaded. Missing keys: {len(msg.missing_keys)}, Unexpected keys: {len(msg.unexpected_keys)}")
+
+    # 检查是否成功加载了 model_ema 的权重（用于推理）
+    if any('model_ema' in key for key in msg.missing_keys):
+        print("WARNING: model_ema weights not loaded! Inference may fail.")
+    else:
+        print("✓ model_ema weights loaded successfully!")
 
     # 加载权重后再移动到目标设备
     # 这样可以避免 meta tensor 的问题

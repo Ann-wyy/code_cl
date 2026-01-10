@@ -13,6 +13,11 @@ import dinov3.distributed as distributed
 
 # 模拟 argparse 给 setup_config 用
 def build_official_model_eval(config_path, weights_path):
+    # 设置使用的 GPU 设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)  # 使用第一个 GPU
+
     # 初始化分布式环境（即使是单GPU也需要）
     if not distributed.is_enabled():
         # 设置单GPU环境变量
@@ -37,29 +42,34 @@ def build_official_model_eval(config_path, weights_path):
 
     args = MockArgs()
     cfg = setup_config(args, strict_cfg=False)
-    
+
     print("Building model in EVAL mode...")
-    # 实例化模型
-    model = SSLMetaArch(cfg).to("cuda")
-    
-    # 官方推荐：在 eval 模式下手动触发 init_weights 
+    # 实例化模型（DINOv3 可能使用 meta 设备初始化）
+    model = SSLMetaArch(cfg)
+
+    # 官方推荐：在 eval 模式下手动触发 init_weights
     # 这会初始化 teacher 和 student 的结构
     model.init_weights()
-    
+
     print(f"Loading checkpoint from: {weights_path}")
     checkpoint = torch.load(weights_path, map_location="cpu")
-    
+
     # DINOv3 官方权重通常包含 'teacher', 'student' 等 key
     # 如果你只需要 teacher 用于 PCA，这里提取 teacher
     if 'teacher' in checkpoint:
         state_dict = checkpoint['teacher']
     else:
         state_dict = checkpoint
-        
-    # 加载权重
+
+    # 加载权重到 CPU
     # 如果报错 key 不匹配，通常是因为官方权重带了 'backbone.' 前缀
     msg = model.load_state_dict(state_dict, strict=False)
     print(f"Weights loaded. Message: {msg}")
+
+    # 加载权重后再移动到目标设备
+    # 这样可以避免 meta tensor 的问题
+    print(f"Moving model to {device}...")
+    model = model.to(device)
     
     model.eval()
     return model

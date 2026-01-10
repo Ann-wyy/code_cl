@@ -59,8 +59,15 @@ def build_official_model_eval(config_path, weights_path):
 
     # 检查 checkpoint 的结构并加载权重
     if 'teacher' in checkpoint:
-        # 完整的训练checkpoint，包含 teacher/student/model_ema
-        state_dict = checkpoint
+        # 完整的训练checkpoint，包含 teacher 子字典
+        # 提取 teacher 权重并映射到 model_ema
+        print("Detected training checkpoint with 'teacher' key, mapping to model_ema...")
+        state_dict = {}
+        teacher_weights = checkpoint['teacher']
+        for key, value in teacher_weights.items():
+            # 将 teacher 的 backbone.* -> model_ema.backbone.*
+            new_key = f"model_ema.{key}"
+            state_dict[new_key] = value
     elif any(key.startswith('backbone.') for key in list(checkpoint.keys())[:20]):
         # 只有单个模型的权重（键名像 'backbone.xxx'），需要添加前缀映射到 model_ema
         print("Detected single model checkpoint, mapping to model_ema...")

@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from torch.utils.data import Sampler
 
-from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NYU
+from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NpzDataset, NYU
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
 
 logger = logging.getLogger("dinov3")
@@ -51,8 +51,17 @@ def _parse_dataset_str(dataset_str: str):
 
     for token in tokens[1:]:
         key, value = token.split("=")
-        assert key in ("root", "extra", "split")
-        kwargs[key] = value
+        # Extended allowed keys for NpzDataset
+        if name == "NpzDataset":
+            assert key in ("root", "csv_file", "npz_key", "image_mode", "csv_column", "has_header")
+            # Convert boolean strings
+            if key == "has_header":
+                kwargs[key] = value.lower() in ("true", "yes", "1")
+            else:
+                kwargs[key] = value
+        else:
+            assert key in ("root", "extra", "split")
+            kwargs[key] = value
 
     if name == "ImageNet":
         class_ = ImageNet
@@ -72,6 +81,8 @@ def _parse_dataset_str(dataset_str: str):
         class_ = NYU
         if "split" in kwargs:
             kwargs["split"] = NYU.Split[kwargs["split"]]
+    elif name == "NpzDataset":
+        class_ = NpzDataset
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 

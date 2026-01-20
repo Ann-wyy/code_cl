@@ -188,21 +188,21 @@ class NpzDataset(ExtendedVisionDataset):
             raise FileNotFoundError(f"NPZ file not found: {npz_path}")
 
         try:
-            # Load NPZ file
-            data = np.load(npz_path)
+            # Load NPZ file with context manager to ensure proper cleanup
+            with np.load(npz_path) as data:
+                # Get image array
+                if self.npz_key not in data:
+                    available_keys = list(data.keys())
+                    raise KeyError(
+                        f"Key '{self.npz_key}' not found in NPZ file. "
+                        f"Available keys: {available_keys}"
+                    )
 
-            # Get image array
-            if self.npz_key not in data:
-                available_keys = list(data.keys())
-                raise KeyError(
-                    f"Key '{self.npz_key}' not found in NPZ file. "
-                    f"Available keys: {available_keys}"
-                )
+                # Copy the array to memory before closing the file
+                # This prevents issues if the array is memory-mapped
+                image_array = np.array(data[self.npz_key])
 
-            image_array = data[self.npz_key]
-
-            # Pass mode to decoder via a wrapper
-            # Note: We return the array, and __getitem__ will create the decoder
+            # Return the copied array (file is now closed)
             return image_array
 
         except Exception as e:

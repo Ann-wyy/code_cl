@@ -34,9 +34,9 @@ from sklearn.metrics import confusion_matrix
 # ================================导入工具函数====================================
 from utils.utils import set_seed, convert_dinov3_teacher_to_hf_state_dict, preprocess_labels_and_setup_datasets
 from metrics import calculate_metrics, log_metrics_to_tensorboard, evaluate
-from MLP_ReLU import MultiTaskImageDatasetFromDataFrame, ClinicalEncoder, DinoV3MultiTaskClassifier
+from MLP_ReLU import MultiTaskImageDatasetFromDataFrame, ClinicalEncoder, MultiTaskClassifier, DinoV3MultiTaskClassifier
 from config import (
-    DINO_VERSION, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
+    MODEL_TYPE, USE_PRETRAINED, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
     PATIENCE, UNFREEZE_LAYERS, RANDOM_SEED, NUM_FOLDS,
     TRAIN_NAME, TRAIN_CSV_PATH, VAL_CSV_PATH, TEST_CSV_PATH,
     IMAGE_PATH_COLUMN, LABEL_COLUMNS, TEXT_COLS,
@@ -164,7 +164,8 @@ def train_multi_task_classifier(logger: logging.Logger):
             task_weights[task] = weight
 
         # --- 初始化模型 ---
-        model = DinoV3MultiTaskClassifier(num_classes_dict, clinical_dim, logger).to(DEVICE)
+        logger.info(f"使用骨干网络: {MODEL_TYPE}")
+        model = MultiTaskClassifier(num_classes_dict, clinical_dim, logger).to(DEVICE)
 
         criterion_dict = {}
         for task in LABEL_COLUMNS:

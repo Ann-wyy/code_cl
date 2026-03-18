@@ -33,17 +33,17 @@ import nibabel as nib
 from utils.utils import set_seed, convert_dinov3_teacher_to_hf_state_dict, preprocess_labels_and_setup_datasets
 from metrics import calculate_metrics, log_metrics_to_tensorboard, evaluate
 from config import (
-    DINO_VERSION, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
+    MODEL_TYPE, USE_PRETRAINED, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
     PATIENCE, UNFREEZE_LAYERS, RANDOM_SEED, NUM_FOLDS,
     TRAIN_NAME, TRAIN_CSV_PATH, VAL_CSV_PATH, TEST_CSV_PATH,
     IMAGE_PATH_COLUMN, LABEL_COLUMNS, TEXT_COLS,
     LOAD_LOCAL_CHECKPOINT, TEST_NAME, LOCAL_CHECKPOINT_PATH, CFG_PATH,
     IGNORE_INDEX, LOG_DIR, LOG_FILENAME
 )
-if DINO_VERSION == "v3":
+if MODEL_TYPE == "dinov3":
     from dinov3.models import build_model_from_cfg
     from dinov3.checkpointer import init_fsdp_model_from_checkpoint
-elif DINO_VERSION == "v2":
+elif MODEL_TYPE == "dinov2":
     from dinov2.models import build_model_from_cfg
 # clinical
 # --- 自定义 PyTorch Dataset (处理多列分类标签) ---
@@ -57,9 +57,14 @@ class MultiTaskImageDatasetFromDataFrame(Dataset):
         self.size = size
         self.logger = logger
         self.clinical_encoder = clinical_encoder
-        cfg = OmegaConf.load(CFG_PATH)
-        self.mean = getattr(cfg.crops, "rgb_mean", None) 
-        self.std  = getattr(cfg.crops, "rgb_std", None)
+        if MODEL_TYPE in ("dinov3", "dinov2"):
+            cfg = OmegaConf.load(CFG_PATH)
+            self.mean = getattr(cfg.crops, "rgb_mean", [0.485, 0.456, 0.406])
+            self.std  = getattr(cfg.crops, "rgb_std",  [0.229, 0.224, 0.225])
+        else:
+            # 非DINO模型统一使用 ImageNet 标准归一化
+            self.mean = [0.485, 0.456, 0.406]
+            self.std  = [0.229, 0.224, 0.225]
         self.processor = T.Compose([
             T.Resize((self.size, self.size)),
             T.ToTensor(),
@@ -186,118 +191,213 @@ class GatedFusionHead(nn.Module):
         fused = g * i_p + (1 - g) * c_p
         return self.classifier(fused)
 
-# --- 自定义模型：DINOv3 + 多个分类头 ---
-def extract_dino_feature(backbone, pixel_values, dino_version):
-
-    if dino_version == "v3":
-        features = backbone.forward_features(pixel_values)
-        global_feature = features["x_norm_clstoken"]
-
-    elif dino_version == "v2":
-        features = backbone.forward_features(pixel_values)
-        global_feature = features['x_norm_clstoken']
-
-    return global_feature
-
-class DinoV3MultiTaskClassifier(nn.Module):
+# =====================================================================
+# 骨干网络构建工厂函数
+# =====================================================================
+def build_backbone(model_type: str, logger: logging.Logger):
     """
-    基于 DINOv3 主干网络，带有多任务分类头。
-    只加载本地 checkpoint，不使用 teacher/student 结构。
-    """
-    def __init__(self, task_num_classes: Dict[str, int], clinical_dim,logger: logging.Logger):
-        super().__init__()
+    构建骨干网络，返回 (backbone, embed_dim)。
 
-        self.task_names = list(task_num_classes.keys())
+    支持的 model_type:
+      DINO系列   : "dinov3", "dinov2"  (需要本地 checkpoint 和 CFG_PATH)
+      ResNet     : "resnet18", "resnet34", "resnet50", "resnet101"
+      EfficientNet: "efficientnet_b0", "efficientnet_b4"
+      ViT        : "vit_b_16"
+      timm       : 任意 timm 模型名称 (需要 pip install timm)
+    """
+    import torchvision.models as tvm
+
+    if model_type in ("dinov3", "dinov2"):
         cfg = OmegaConf.load(CFG_PATH)
-        self.backbone, self.embed_dim = build_model_from_cfg(cfg, only_teacher=True)
-        if DINO_VERSION == "v3":
-            self.backbone.to_empty(device=DEVICE)
-        elif DINO_VERSION == "v2":
-            self.backbone.to(device=DEVICE)
-        checkpoint = torch.load(LOCAL_CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
-        logger.info(f"load checkpoint: {LOCAL_CHECKPOINT_PATH}")
-        if DINO_VERSION == "v3":
-            state_dict = checkpoint["teacher"] if "teacher" in checkpoint else checkpoint
+        backbone, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
+        if model_type == "dinov3":
+            backbone.to_empty(device=DEVICE)
+        else:
+            backbone.to(device=DEVICE)
 
-            model_state_dict = self.backbone.state_dict()
+        checkpoint = torch.load(LOCAL_CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+        logger.info(f"加载DINO checkpoint: {LOCAL_CHECKPOINT_PATH}")
+
+        if model_type == "dinov3":
+            state_dict = checkpoint.get("teacher", checkpoint)
+            model_state_dict = backbone.state_dict()
             new_state_dict = {}
-            # 获取模型所有的标准键名
-            target_keys = model_state_dict.keys()
+            target_keys = list(model_state_dict.keys())
             for k, v in state_dict.items():
                 for tk in target_keys:
                     if k.endswith(tk):
                         new_state_dict[tk] = v
                         break
-        elif DINO_VERSION == "v2":
-            if "teacher" in checkpoint:
-                new_state_dict = checkpoint["teacher"]
-            elif "model" in checkpoint:
-                new_state_dict = checkpoint["model"]
-            else:
-                new_state_dict = checkpoint
-        msg = self.backbone.load_state_dict(new_state_dict, strict=False)
-        logger.info(
-            f"Backbone loaded. Missing: {len(msg.missing_keys)}, Unexpected: {len(msg.unexpected_keys)}"
-        )
-        # ==================== 3. 冻结/解冻主干 ====================
+        else:  # dinov2
+            new_state_dict = checkpoint.get("teacher", checkpoint.get("model", checkpoint))
+
+        msg = backbone.load_state_dict(new_state_dict, strict=False)
+        logger.info(f"Backbone loaded. Missing: {len(msg.missing_keys)}, Unexpected: {len(msg.unexpected_keys)}")
+        return backbone, embed_dim
+
+    # ---------- ResNet ----------
+    elif model_type == "resnet18":
+        weights = tvm.ResNet18_Weights.IMAGENET1K_V1 if USE_PRETRAINED else None
+        backbone = tvm.resnet18(weights=weights)
+        embed_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+
+    elif model_type == "resnet34":
+        weights = tvm.ResNet34_Weights.IMAGENET1K_V1 if USE_PRETRAINED else None
+        backbone = tvm.resnet34(weights=weights)
+        embed_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+
+    elif model_type == "resnet50":
+        weights = tvm.ResNet50_Weights.IMAGENET1K_V2 if USE_PRETRAINED else None
+        backbone = tvm.resnet50(weights=weights)
+        embed_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+
+    elif model_type == "resnet101":
+        weights = tvm.ResNet101_Weights.IMAGENET1K_V2 if USE_PRETRAINED else None
+        backbone = tvm.resnet101(weights=weights)
+        embed_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+
+    # ---------- EfficientNet ----------
+    elif model_type == "efficientnet_b0":
+        weights = tvm.EfficientNet_B0_Weights.IMAGENET1K_V1 if USE_PRETRAINED else None
+        backbone = tvm.efficientnet_b0(weights=weights)
+        embed_dim = backbone.classifier[1].in_features
+        backbone.classifier = nn.Identity()
+
+    elif model_type == "efficientnet_b4":
+        weights = tvm.EfficientNet_B4_Weights.IMAGENET1K_V1 if USE_PRETRAINED else None
+        backbone = tvm.efficientnet_b4(weights=weights)
+        embed_dim = backbone.classifier[1].in_features
+        backbone.classifier = nn.Identity()
+
+    # ---------- ViT ----------
+    elif model_type == "vit_b_16":
+        weights = tvm.ViT_B_16_Weights.IMAGENET1K_V1 if USE_PRETRAINED else None
+        backbone = tvm.vit_b_16(weights=weights)
+        embed_dim = backbone.heads.head.in_features
+        backbone.heads = nn.Identity()
+
+    # ---------- timm (兜底) ----------
+    else:
+        try:
+            import timm
+            backbone = timm.create_model(model_type, pretrained=USE_PRETRAINED, num_classes=0)
+            embed_dim = backbone.num_features
+        except Exception as e:
+            raise ValueError(
+                f"不支持的模型类型: '{model_type}'。"
+                f"请检查拼写，或安装 timm (pip install timm) 后使用任意 timm 模型名。\n错误: {e}"
+            )
+
+    logger.info(f"加载 {model_type} backbone，特征维度={embed_dim}，预训练={USE_PRETRAINED}")
+    return backbone, embed_dim
+
+
+# =====================================================================
+# 特征提取统一接口
+# =====================================================================
+def extract_feature(backbone, pixel_values, model_type: str):
+    if model_type in ("dinov3", "dinov2"):
+        features = backbone.forward_features(pixel_values)
+        return features["x_norm_clstoken"]
+    else:
+        return backbone(pixel_values)
+
+
+# =====================================================================
+# 统一多任务分类器（支持所有模型类型）
+# =====================================================================
+class MultiTaskClassifier(nn.Module):
+    """
+    通用多任务分类器，骨干网络由 config.MODEL_TYPE 控制。
+    支持 DINO 系列、ResNet、EfficientNet、ViT 及 timm 任意模型。
+    """
+    def __init__(self, task_num_classes: Dict[str, int], clinical_dim, logger: logging.Logger):
+        super().__init__()
+        self.task_names = list(task_num_classes.keys())
+        self.model_type = MODEL_TYPE
+
+        # ========== 1. 构建骨干网络 ==========
+        self.backbone, embed_dim = build_backbone(MODEL_TYPE, logger)
+
+        # ========== 2. 冻结 / 解冻骨干层 ==========
         if UNFREEZE_LAYERS < 0:
+            # 全部解冻
             for p in self.backbone.parameters():
                 p.requires_grad = True
+            logger.info("骨干网络全部参数已解冻")
         else:
+            # 先全部冻结
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
-            num_layers = len(self.backbone.blocks)
+            if UNFREEZE_LAYERS > 0:
+                if MODEL_TYPE in ("dinov3", "dinov2") and hasattr(self.backbone, "blocks"):
+                    # DINO Transformer blocks
+                    num_layers = len(self.backbone.blocks)
+                    start = max(0, num_layers - UNFREEZE_LAYERS)
+                    for i in range(start, num_layers):
+                        for p in self.backbone.blocks[i].parameters():
+                            p.requires_grad = True
+                    logger.info(f"已解冻 DINO 最后 {UNFREEZE_LAYERS} 个 Transformer Blocks")
+                else:
+                    # 通用方案：按子模块列表解冻最后 N 个
+                    children = list(self.backbone.children())
+                    n = min(UNFREEZE_LAYERS, len(children))
+                    for child in children[-n:]:
+                        for p in child.parameters():
+                            p.requires_grad = True
+                    logger.info(f"已解冻 {MODEL_TYPE} 最后 {n} 个子模块")
+            else:
+                logger.info("骨干网络全部参数已冻结 (UNFREEZE_LAYERS=0)")
 
-            for i in range(num_layers - UNFREEZE_LAYERS, num_layers):
-                for p in self.backbone.blocks[i].parameters():
-                    p.requires_grad = True
-
-        logger.info(f"已解冻最后 {UNFREEZE_LAYERS} 层 Transformer Blocks")
-
-        # ==================== 4. 定义多任务分类头 ====================
+        # ========== 3. 多任务分类头 ==========
         self.classifiers = nn.ModuleDict()
-        feature_dim = self.embed_dim
         for task_name, num_classes in task_num_classes.items():
             out_dim = 1 if num_classes == 2 else num_classes
-            self.classifiers[task_name] = GatedFusionHead(feature_dim, clinical_dim, out_dim)
+            self.classifiers[task_name] = GatedFusionHead(embed_dim, clinical_dim, out_dim)
 
-        
-    def forward(self, pixel_values: torch.Tensor, clinical_values):
+    def forward(self, pixel_values: torch.Tensor, clinical_values: torch.Tensor):
         pixel_values = pixel_values.to(DEVICE)
         clinical_values = clinical_values.to(DEVICE)
+
         if torch.isnan(pixel_values).any():
             print("pixel_values contain NaN")
         if torch.isinf(pixel_values).any():
             print("pixel_values contain Inf")
-
         if torch.isnan(clinical_values).any():
             print("clinical_values contain NaN")
         if torch.isinf(clinical_values).any():
             print("clinical_values contain Inf")
+
         if UNFREEZE_LAYERS == 0:
             with torch.no_grad():
-                global_feature = extract_dino_feature(self.backbone,pixel_values,DINO_VERSION)
+                global_feature = extract_feature(self.backbone, pixel_values, self.model_type)
         else:
-            global_feature = extract_dino_feature(self.backbone,pixel_values,DINO_VERSION)
+            global_feature = extract_feature(self.backbone, pixel_values, self.model_type)
+
         if torch.isnan(global_feature).any():
             print("global_feature contain NaN")
         if torch.isinf(global_feature).any():
             print("global_feature contain Inf")
+
         logits = {}
         for task_name in self.task_names:
-
             task_logits = self.classifiers[task_name](global_feature, clinical_values)
-
             if torch.isnan(task_logits).any():
                 print(f"{task_name} logits contain NaN")
-
             if torch.isinf(task_logits).any():
                 print(f"{task_name} logits contain Inf")
-
             logits[task_name] = task_logits
 
         return logits
+
+
+# 向后兼容别名
+DinoV3MultiTaskClassifier = MultiTaskClassifier
     
     
 

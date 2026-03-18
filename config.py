@@ -11,6 +11,7 @@ import time
 #   timm任意模型: 如 "swin_base_patch4_window7_224", "convnext_base" (需要安装timm)
 MODEL_TYPE = "dinov3"
 USE_PRETRAINED = True          # 非DINO模型是否使用ImageNet预训练权重
+USE_CLINICAL = True            # True: 图像+临床特征融合(GatedFusion); False: 仅使用图像特征
 DEVICE = "cuda:6"              # GPU设备
 TARGET_IMAGE_SIZE =  512       # 图像尺寸
 BATCH_SIZE = 4
@@ -33,7 +34,8 @@ TEXT_COLS = ['age','Gender']
 
 # ----------------- checkpoint与日志 -----------------
 LOAD_LOCAL_CHECKPOINT = True   # 仅对 dinov3/dinov2 有效，其他模型自动使用 torchvision/timm 权重
-TEST_NAME = f"xray_MLP_{MODEL_TYPE}_{UNFREEZE_LAYERS}_{TRAIN_NAME}_{TARGET_IMAGE_SIZE}_{LEARNING_RATE}_{RANDOM_SEED}"
+_fusion_tag = "imgcli" if USE_CLINICAL else "imgonly"
+TEST_NAME = f"xray_MLP_{MODEL_TYPE}_{_fusion_tag}_{UNFREEZE_LAYERS}_{TRAIN_NAME}_{TARGET_IMAGE_SIZE}_{LEARNING_RATE}_{RANDOM_SEED}"
 LOCAL_CHECKPOINT_PATH = "/data/truenas_B2/yyi/weight/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
 CFG_PATH = "/home/yyi/CODE/model/dinov3_vitb16_pretrain.yaml"
 IGNORE_INDEX = -1

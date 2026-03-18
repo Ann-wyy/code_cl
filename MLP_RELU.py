@@ -33,7 +33,7 @@ import nibabel as nib
 from utils.utils import set_seed, convert_dinov3_teacher_to_hf_state_dict, preprocess_labels_and_setup_datasets
 from metrics import calculate_metrics, log_metrics_to_tensorboard, evaluate
 from config import (
-    MODEL_TYPE, USE_PRETRAINED, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
+    MODEL_TYPE, USE_PRETRAINED, USE_CLINICAL, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
     PATIENCE, UNFREEZE_LAYERS, RANDOM_SEED, NUM_FOLDS,
     TRAIN_NAME, TRAIN_CSV_PATH, VAL_CSV_PATH, TEST_CSV_PATH,
     IMAGE_PATH_COLUMN, LABEL_COLUMNS, TEXT_COLS,
@@ -157,6 +157,26 @@ class ClinicalEncoder:
             body[self.body_part_map[body_val]] = 1.0'''
         
         return torch.cat([age, gender])
+
+
+# ---- 仅图像特征的分类头（USE_CLINICAL=False 时使用）----
+class ImageOnlyHead(nn.Module):
+    """不融合临床信息，直接用图像特征分类。"""
+    def __init__(self, image_dim, output_dim):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(image_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, output_dim)
+        )
+        self.last_g = None  # 与 GatedFusionHead 接口对齐（无门控值）
+
+    def forward(self, img_feat, cli_feat=None):
+        return self.classifier(img_feat)
 
 
 # ---- Gated ---
@@ -358,7 +378,12 @@ class MultiTaskClassifier(nn.Module):
         self.classifiers = nn.ModuleDict()
         for task_name, num_classes in task_num_classes.items():
             out_dim = 1 if num_classes == 2 else num_classes
-            self.classifiers[task_name] = GatedFusionHead(embed_dim, clinical_dim, out_dim)
+            if USE_CLINICAL:
+                self.classifiers[task_name] = GatedFusionHead(embed_dim, clinical_dim, out_dim)
+            else:
+                self.classifiers[task_name] = ImageOnlyHead(embed_dim, out_dim)
+        mode_str = "图像+临床融合 (GatedFusion)" if USE_CLINICAL else "仅图像特征 (ImageOnly)"
+        logger.info(f"分类头模式: {mode_str}")
 
     def forward(self, pixel_values: torch.Tensor, clinical_values: torch.Tensor):
         pixel_values = pixel_values.to(DEVICE)

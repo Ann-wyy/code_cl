@@ -36,7 +36,7 @@ from utils.utils import set_seed, convert_dinov3_teacher_to_hf_state_dict, prepr
 from metrics import calculate_metrics, log_metrics_to_tensorboard, evaluate
 from MLP_ReLU import MultiTaskImageDatasetFromDataFrame, ClinicalEncoder, MultiTaskClassifier, DinoV3MultiTaskClassifier
 from config import (
-    MODEL_TYPE, USE_PRETRAINED, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
+    MODEL_TYPE, USE_PRETRAINED, USE_CLINICAL, DEVICE, TARGET_IMAGE_SIZE, BATCH_SIZE, LEARNING_RATE, NUM_EPOCHS,
     PATIENCE, UNFREEZE_LAYERS, RANDOM_SEED, NUM_FOLDS,
     TRAIN_NAME, TRAIN_CSV_PATH, VAL_CSV_PATH, TEST_CSV_PATH,
     IMAGE_PATH_COLUMN, LABEL_COLUMNS, TEXT_COLS,
@@ -336,23 +336,29 @@ if __name__ == "__main__":
 
     if trained_model:
         trained_model.eval()
-        for task_name in LABEL_COLUMNS:
-            # g 的形状为 [Batch_Size, 512]
-            g_tensor = trained_model.classifiers[task_name].last_g
-            
-            # 计算平均值
-            avg_g = g_tensor.mean().item()
-            
-            main_logger.info(f"任务名称: {task_name}")
-            main_logger.info(f"  - g 值矩阵形状: {list(g_tensor.shape)}")
-            main_logger.info(f"  - 平均图像权重比例: {avg_g:.4f}")
-            
-            # 判断偏向
-            bias = "图像 (Image)" if avg_g > 0.5 else "临床 (Clinical)"
-            main_logger.info(f"  - 决策偏向结论: 更加依赖 {bias}")
-            
-            # 如果你想看每个样本的具体分数（512维取均值后）
-            sample_gs = g_tensor.mean(dim=1).cpu().numpy()
-            main_logger.info(f"  - 该批次前5个样本的 g 分数: {sample_gs[:5]}")
-            main_logger.info("-" * 30)
+        if not USE_CLINICAL:
+            main_logger.info("USE_CLINICAL=False，使用纯图像模式，无门控融合信息可分析。")
+        else:
+            for task_name in LABEL_COLUMNS:
+                # g 的形状为 [Batch_Size, 512]
+                g_tensor = trained_model.classifiers[task_name].last_g
+                if g_tensor is None:
+                    main_logger.info(f"任务名称: {task_name} — last_g 为空，跳过分析")
+                    continue
+
+                # 计算平均值
+                avg_g = g_tensor.mean().item()
+
+                main_logger.info(f"任务名称: {task_name}")
+                main_logger.info(f"  - g 值矩阵形状: {list(g_tensor.shape)}")
+                main_logger.info(f"  - 平均图像权重比例: {avg_g:.4f}")
+
+                # 判断偏向
+                bias = "图像 (Image)" if avg_g > 0.5 else "临床 (Clinical)"
+                main_logger.info(f"  - 决策偏向结论: 更加依赖 {bias}")
+
+                # 如果你想看每个样本的具体分数（512维取均值后）
+                sample_gs = g_tensor.mean(dim=1).cpu().numpy()
+                main_logger.info(f"  - 该批次前5个样本的 g 分数: {sample_gs[:5]}")
+                main_logger.info("-" * 30)
                 

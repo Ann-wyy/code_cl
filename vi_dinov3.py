@@ -1,7 +1,5 @@
 import os
-PYTHONPATH='/data/dataserver01/zhangruipeng/code/PETCT/dinov3_pretrain/dinov3'
 import sys
-sys.path.insert(0, PYTHONPATH)
 import torch
 import numpy as np
 from PIL import Image
@@ -11,44 +9,93 @@ from tqdm import tqdm
 # --- 导入官方组件 ---
 from dinov3.configs import setup_config
 from dinov3.train.ssl_meta_arch import SSLMetaArch
+import dinov3.distributed as distributed
 
 # 模拟 argparse 给 setup_config 用
 def build_official_model_eval(config_path, weights_path):
+    # 设置使用的 GPU 设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)  # 使用第一个 GPU
+
+    # 初始化分布式环境（即使是单GPU也需要）
+    if not distributed.is_enabled():
+        # 设置单GPU环境变量
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '12355'
+        os.environ['RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
+        os.environ['LOCAL_RANK'] = '0'
+
+        # 使用 dinov3 的分布式包装器初始化（它会自动调用 init_process_group）
+        distributed.enable(overwrite=True)
+        print("Distributed environment initialized for single GPU/CPU inference")
 
     class MockArgs:
         def __init__(self):
-            self.config_file = config_path 
+            self.config_file = config_path
             # 这里的 opts 配合 eval 模式
             self.opts = []
-            self.output_dir = os.path.dirname(config_path) 
+            self.output_dir = os.path.dirname(config_path)
             self.no_resume = True
             self.eval_only = True  # 触发 eval 模式标志
 
     args = MockArgs()
     cfg = setup_config(args, strict_cfg=False)
-    
+
     print("Building model in EVAL mode...")
-    # 实例化模型
-    model = SSLMetaArch(cfg).to("cuda")
-    
-    # 官方推荐：在 eval 模式下手动触发 init_weights 
+    # 实例化模型（DINOv3 可能使用 meta 设备初始化）
+    model = SSLMetaArch(cfg)
+
+    # 官方推荐：在 eval 模式下手动触发 init_weights
     # 这会初始化 teacher 和 student 的结构
     model.init_weights()
-    
+
     print(f"Loading checkpoint from: {weights_path}")
     checkpoint = torch.load(weights_path, map_location="cpu")
-    
-    # DINOv3 官方权重通常包含 'teacher', 'student' 等 key
-    # 如果你只需要 teacher 用于 PCA，这里提取 teacher
+
+    # 调试：打印 checkpoint 的顶层键
+    print(f"Checkpoint top-level keys (first 10): {list(checkpoint.keys())[:10]}")
+
+    # 检查 checkpoint 的结构并加载权重
     if 'teacher' in checkpoint:
-        state_dict = checkpoint['teacher']
+        # 完整的训练checkpoint，包含 teacher 子字典
+        # 提取 teacher 权重并映射到 model_ema
+        print("Detected training checkpoint with 'teacher' key, mapping to model_ema...")
+        state_dict = {}
+        teacher_weights = checkpoint['teacher']
+        for key, value in teacher_weights.items():
+            # 将 teacher 的 backbone.* -> model_ema.backbone.*
+            new_key = f"model_ema.{key}"
+            state_dict[new_key] = value
+    elif any(key.startswith('backbone.') for key in list(checkpoint.keys())[:20]):
+        # 只有单个模型的权重（键名像 'backbone.xxx'），需要添加前缀映射到 model_ema
+        print("Detected single model checkpoint, mapping to model_ema...")
+        state_dict = {}
+        for key, value in checkpoint.items():
+            # 将 backbone.* -> model_ema.backbone.*
+            # 将 dino_head.* -> model_ema.dino_head.*
+            new_key = f"model_ema.{key}"
+            state_dict[new_key] = value
     else:
+        # 未知格式
+        print(f"WARNING: Unknown checkpoint format! Keys: {list(checkpoint.keys())[:5]}")
         state_dict = checkpoint
-        
-    # 加载权重
-    # 如果报错 key 不匹配，通常是因为官方权重带了 'backbone.' 前缀
+
+    # 加载权重到 CPU
     msg = model.load_state_dict(state_dict, strict=False)
-    print(f"Weights loaded. Message: {msg}")
+    print(f"Weights loaded. Missing keys: {len(msg.missing_keys)}, Unexpected keys: {len(msg.unexpected_keys)}")
+
+    # 检查是否成功加载了 model_ema 的权重（用于推理）
+    if any('model_ema' in key for key in msg.missing_keys):
+        print("WARNING: model_ema weights not loaded! Inference may fail.")
+    else:
+        print("✓ model_ema weights loaded successfully!")
+
+    # 加载权重后再移动到目标设备
+    # 这样可以避免 meta tensor 的问题
+    print(f"Moving model to {device}...")
+    model = model.to(device)
     
     model.eval()
     return model
